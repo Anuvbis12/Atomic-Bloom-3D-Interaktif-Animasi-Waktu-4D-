@@ -2,211 +2,123 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import time
+import collections
+import math
+import torch
 
 # ==========================================
-# KONFIGURASI SISTEM
+# GOD-EYE TACTICAL OS V8.2 (FIXED DEVICE)
 # ==========================================
-# Model yang digunakan (Nano segmentation untuk kecepatan real-time)
-MODEL_PATH = "yolov8n-seg.pt"
-# Mode Awal: 'thermal' atau 'normal'
-INITIAL_MODE = 'thermal'
-# Status Toggles Awal
-STATUS_NIGHT_VISION = True
-STATUS_THERMAL_MODE = True  # Jika mode awal thermal, ini harus True
-
-# Warna Tampilan (BGR)
-CLR_TACTICAL_GREEN = (0, 255, 0)
-CLR_DANGER_RED = (0, 0, 255)
-CLR_WHITE = (255, 255, 255)
-CLR_BLACK = (0, 0, 0)
+MODEL_PATH = "yolov8n-pose.pt"
 
 
-# ==========================================
-# CLASS VISI TAKTIS
-# ==========================================
-class TacticalScope:
+class GodEyeV8:
     def __init__(self):
-        # Load Model
-        print(f"⏳ Loading model: {MODEL_PATH}...")
-        self.model = YOLO(MODEL_PATH)
-        print("✅ Model Loaded.")
+        print("⚡ ANALYZING HARDWARE...")
 
-        # System State
-        self.night_vision = STATUS_NIGHT_VISION
-        self.thermal_mode = STATUS_THERMAL_MODE
-        self.target_locked = False
-
-        # FPS Counter
-        self.prev_frame_time = 0
-        self.new_frame_time = 0
-
-    def apply_thermal_visualization(self, frame):
-        """Mengubah frame normal menjadi visualisasi panas."""
-        # Ubah ke Grayscale terlebih dahulu
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Terapkan Colormap JET (Biru=Dingin, Merah=Panas)
-        thermal_frame = cv2.applyColorMap(gray_frame, cv2.COLORMAP_JET)
-        return thermal_frame
-
-    def apply_night_vision_effect(self, frame):
-        """Terapkan efek visi malam hijau taktis."""
-        # Split channel BGR
-        b, g, r = cv2.split(frame)
-        # Buat channel kosong
-        blank = np.zeros_like(g)
-        # Gabungkan kembali dengan channel hijau sebagai dominan, lainnya kosong
-        # Ini memberikan tint hijau monokromatik
-        night_vision_frame = cv2.merge([blank, g, blank])
-        return night_vision_frame
-
-    def draw_tactical_hud(self, frame, results):
-        """Gambar elemen UI Taktis (HUD)."""
-        h, w, _ = frame.shape
-
-        # --- 1. System Info Bar (Atas) ---
-        hud_top = frame.copy()
-        cv2.rectangle(hud_top, (0, 0), (w, 60), CLR_BLACK, -1)
-        cv2.addWeighted(hud_top, 0.5, frame, 0.5, 0, frame)
-
-        # GPU Status (Dummy), System Name, Mode, Toggles
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(frame, "GPU: NVIDIA RTX | CUDA: ACTIVE", (20, 35), font, 0.7, CLR_WHITE, 2)
-        cv2.putText(frame, "SYSTEM: TACTICAL_OS_V3", (w - 350, 35), font, 0.7, CLR_TACTICAL_GREEN, 2)
-
-        # --- 2. Toggles Tampilan (Kanan) ---
-        toggle_box_w = 250
-        toggle_box_h = 150
-        toggle_box_x = w - toggle_box_w - 20
-        toggle_box_y = 80
-
-        # Latar belakang Toggle
-        toggle_bg = frame.copy()
-        cv2.rectangle(toggle_bg, (toggle_box_x, toggle_box_y), (w - 20, toggle_box_y + toggle_box_h), CLR_BLACK, -1)
-        cv2.addWeighted(toggle_bg, 0.4, frame, 0.6, 0, frame)
-
-        # Fungsi Gambar Toggle
-        def draw_toggle(img, y_pos, text, state):
-            color = CLR_TACTICAL_GREEN if state else (100, 100, 100)
-            status_txt = "ON" if state else "OFF"
-            cv2.putText(img, f"{text}:", (toggle_box_x + 15, y_pos), font, 0.6, CLR_WHITE, 1)
-            cv2.putText(img, status_txt, (toggle_box_x + 180, y_pos), font, 0.6, color, 2)
-
-        draw_toggle(frame, toggle_box_y + 40, "THERMAL_MODE", self.thermal_mode)
-        draw_toggle(frame, toggle_box_y + 90, "NIGHT_VISION", self.night_vision)
-        cv2.putText(frame, "('T' to Toggle)", (toggle_box_x + 15, toggle_box_y + 130), font, 0.5, (150, 150, 150), 1)
-
-        # --- 3. FPS Counter & Status Taktis ---
-        fps = 1 / (self.new_frame_time - self.prev_frame_time)
-        cv2.putText(frame, f"FPS: {int(fps)}", (20, h - 30), font, 0.6, CLR_WHITE, 1)
-
-        status_color = CLR_DANGER_RED if self.target_locked else CLR_TACTICAL_GREEN
-        status_txt = "!!! HAZARD DETECTED !!!" if self.target_locked else "SCANNING..."
-        cv2.putText(frame, status_txt, (w // 2 - 150, h - 30), font, 0.8, status_color, 2)
-
-        # --- 4. Objek & Segmentation (Jika Termal Aktif) ---
-        if self.thermal_mode:
-            # results[0].plot() akan menggambar BB, Labels, dan Mask asli YOLO
-            # Namun kita ingin menggambarnya di atas frame TERMAL
-            # Jadi kita perlu teknik blend mask
-
-            # Buat frame kosong untuk menggambar mask
-            mask_frame = np.zeros_like(frame)
-
-            # Ambil deteksi orang (Class 0 di COCO)
-            self.target_locked = False
-            for result in results:
-                masks = result.masks
-                boxes = result.boxes
-
-                if masks is not None:
-                    for i, (mask, box) in enumerate(zip(masks.xy, boxes)):
-                        class_id = int(box.cls[0])
-
-                        # Hanya proses 'person'
-                        if class_id == 0:
-                            self.target_locked = True
-
-                            # Gambar Mask Hijau di frame kosong
-                            polygon = mask.astype(np.int32)
-                            cv2.fillPoly(mask_frame, [polygon], CLR_TACTICAL_GREEN)
-
-                            # Gambar Bounding Box Kuning
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-
-                            # Label Info
-                            cv2.putText(frame, f"USER_ID: 00{i + 1}", (x1, y1 - 10), font, 0.5, (0, 255, 255), 1)
-
-            # Blend Mask Hijau ke Frame Termal
-            # Mask Hijau hanya muncul di area objek 'person'
-            frame = cv2.addWeighted(frame, 1.0, mask_frame, 0.3, 0)
-
+        # --- PERBAIKAN DEVICE STRING ---
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda:0")  # String yang benar untuk GPU
+            device_name = torch.cuda.get_device_name(0)
+            print(f"✅ GPU DETECTED: {device_name}. ACCELERATING...")
         else:
-            # Jika Normal/Night Vision, gunakan plot standar YOLO
-            frame = results[0].plot(boxes=True, masks=True, labels=True)
+            self.device = torch.device("cpu")
+            print("⚠️ GPU NOT FOUND. FALLING BACK TO CPU.")
+
+        # Load model ke device
+        try:
+            self.model = YOLO(MODEL_PATH).to(self.device)
+            print("✅ Model loaded to device successfully.")
+        except Exception as e:
+            print(f"❌ Error loading model to GPU: {e}. Switching to CPU...")
+            self.model = YOLO(MODEL_PATH).to("cpu")
+            self.device = "cpu"
+
+        self.trail_buffer = collections.deque(maxlen=10)
+        self.prev_kpts = {}
+        self.alpha = 0.85
+        self.boot_time = time.time()
+
+    def draw_glitch_text(self, img, text, pos, color):
+        offset = np.random.randint(-1, 2)
+        cv2.putText(img, text, (pos[0] + offset, pos[1] + offset),
+                    cv2.FONT_HERSHEY_PLAIN, 1.0, color, 1, cv2.LINE_AA)
+
+    def draw_skeleton_pro(self, frame, results):
+        if not results or results[0].keypoints is None: return frame
+
+        # Kadang data di GPU harus dipindah ke CPU untuk operasi NumPy
+        kpts_data = results[0].keypoints.data.cpu().numpy()
+        boxes = results[0].boxes
+        ids = boxes.id.int().cpu().numpy() if boxes.id is not None else range(len(kpts_data))
+
+        self.trail_buffer.append(kpts_data.copy())
+
+        for idx, person in enumerate(kpts_data):
+            pid = ids[idx]
+            conf_avg = np.mean(person[:, 2])
+
+            # Trail Ghosting
+            for past_frame in self.trail_buffer:
+                if idx < len(past_frame):
+                    for p1, p2 in [(5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (12, 14)]:
+                        pt1 = (int(past_frame[idx][p1][0]), int(past_frame[idx][p1][1]))
+                        pt2 = (int(past_frame[idx][p2][0]), int(past_frame[idx][p2][1]))
+                        cv2.line(frame, pt1, pt2, (0, 70, 0), 1)
+
+            # Bounding Box
+            bbox = boxes.xyxy[idx].cpu().numpy()
+            x1, y1, x2, y2 = map(int, bbox)
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 1)
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+
+            connections = [(0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
+                           (5, 11), (6, 12), (11, 12), (11, 13), (13, 15), (12, 14), (14, 16)]
+
+            thickness = max(1, int(3 - (y2 - y1) / 300))
+
+            for p1, p2 in connections:
+                if person[p1][2] > 0.5 and person[p2][2] > 0.5:
+                    c1, c2 = (int(person[p1][0]), int(person[p1][1])), (int(person[p2][0]), int(person[p2][1]))
+                    cv2.line(frame, c1, c2, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.line(frame, c1, c2, (0, 255, 127), thickness + 1, cv2.LINE_AA)
+
+            for px, py, pconf in person:
+                if pconf > 0.6:
+                    radius = int(3 + math.sin(time.time() * 10) * 2)
+                    cv2.circle(frame, (int(px), int(py)), radius, (0, 255, 0), 1)
 
         return frame
 
-    def process_video(self):
-        cap = cv2.VideoCapture(0)  # Gunakan Webcam
+    def apply_cyber_filter(self, frame):
+        frame[:, :, 0] = frame[:, :, 0] * 0.1
+        frame[:, :, 2] = frame[:, :, 2] * 0.1
+        return frame
 
+    def run(self):
+        cap = cv2.VideoCapture(0)
         while cap.isOpened():
-            success, frame = cap.read()
-            if not success: break
-            frame = cv2.flip(frame, 1)  # Flip horizontal
+            ret, frame = cap.read()
+            if not ret: break
+            frame = cv2.flip(frame, 1)
 
-            # Update FPS Time
-            self.new_frame_time = time.time()
+            # --- INFERENCE ON DEVICE ---
+            results = self.model.track(frame, persist=True, verbose=False, conf=0.4, device=self.device)
 
-            # --- PRE-PROCESSING VIEW MODE ---
-            base_view = frame.copy()
+            canvas = self.apply_cyber_filter(frame.copy())
+            canvas = cv2.addWeighted(canvas, 0.4, np.zeros_like(frame), 0.6, 0)
+            canvas = self.draw_skeleton_pro(canvas, results)
 
-            # 1. Terapkan Mode Thermal
-            if self.thermal_mode:
-                base_view = self.apply_thermal_visualization(base_view)
+            # HUD Status
+            cv2.putText(canvas, f"SYSTEM: {self.device}", (20, 30), 0, 0.6, (255, 255, 255), 1)
+            cv2.imshow("GOD-EYE V8.2", canvas)
 
-            # 2. Terapkan Mode Night Vision (Overlay Tint Hijau)
-            if self.night_vision:
-                base_view = self.apply_night_vision_effect(base_view)
-
-            # --- INFERENCE (YOLO) ---
-            # Jalankan deteksi di atas frame asli atau yang sudah dimodifikasi
-            # Untuk akurasi segmentasi terbaik, gunakan frame normal untuk inference
-            # Namun untuk visualisasi, kita tampilkan hasil di view mode
-            yolo_results = self.model.track(frame, persist=True, verbose=False, conf=0.5, classes=0)
-
-            # --- DRAW HUD & RESULTS ---
-            tactical_view = self.draw_tactical_hud(base_view, yolo_results)
-
-            # Update FPS Time
-            self.prev_frame_time = self.new_frame_time
-
-            # Tampilkan Hasil
-            cv2.imshow("Nuclear Tactical Scope v3.0", tactical_view)
-
-            # --- KEYBOARD CONTROLS ---
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):  # 'Q' untuk keluar
-                break
-            elif key == ord('t'):  # 'T' untuk toggle mode views
-                # Cycle through: Normal -> Night Vision -> Thermal+Night Vision -> Thermal -> Normal
-                if not self.thermal_mode and not self.night_vision:
-                    self.night_vision = True
-                elif not self.thermal_mode and self.night_vision:
-                    self.thermal_mode = True
-                elif self.thermal_mode and self.night_vision:
-                    self.night_vision = False
-                elif self.thermal_mode and not self.night_vision:
-                    self.thermal_mode = False
-                    self.night_vision = False
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
 
         cap.release()
         cv2.destroyAllWindows()
 
 
-# ==========================================
-# RUN SYSTEM
-# ==========================================
 if __name__ == "__main__":
-    scope = TacticalScope()
-    scope.process_video()
+    GodEyeV8().run()
